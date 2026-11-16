@@ -1,0 +1,1262 @@
+diff --git a/src/app.rs b/src/app.rs
+index 97844eb..69e57e9 100644
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -34,8 +34,10 @@ pub const MAIL_PAGE: usize = 5;
+ pub const QUOTA_PAGE: usize = 6;
+ pub const CALENDAR_PAGE: usize = 7;
+ pub const WEATHER_PAGE: usize = 8;
++pub const BAMBU_PAGE: usize = 9;
+ pub(crate) const WEATHER_H: f32 = 232.0;
+ pub(crate) const CALENDAR_H: f32 = 216.0;
++pub(crate) const BAMBU_H: f32 = 156.0;
+ pub const BAR_W: f32 = 163.0; // 收起药丸宽
+ pub const BAR_H: f32 = 30.0; // 收起药丸高
+ pub(crate) const HUD_W: f32 = 260.0;
+@@ -78,8 +80,8 @@ fn pill_shadow(painter:&egui::Painter,rect:Rect,radius:f32,strength:f32){
+         painter.rect_filled(r,radius+grow*0.8,Color32::from_black_alpha((255.0*a*strength) as u8));
+     }
+ }
+-pub(crate) const PAGE_NAMES: [&str; 9] = ["音乐", "专注", "健康", "置物架", "待办", "邮箱", "AI 额度", "日程", "天气"];
+-pub(crate) const PAGE_SETTINGS_TABS: [usize; 9] = [1,2,3,5,4,7,11,8,12];
++pub(crate) const PAGE_NAMES: [&str; 10] = ["音乐", "专注", "健康", "置物架", "待办", "邮箱", "AI 额度", "日程", "天气", "打印"];
++pub(crate) const PAGE_SETTINGS_TABS: [usize; 10] = [1, 2, 3, 5, 4, 7, 11, 8, 12, 13];
+ 
+ // ---------- 动效参数 ----------
+ /// 悬停意图缓冲：光标停留这么久才真正展开（期间药丸轻微胀大作为反馈），防误触。
+@@ -729,7 +731,7 @@ pub struct App {
+     page_dir: f32,
+     page_t0: f64,
+     slide: Spring,
+-    dots: [Spring; 9],
++    dots: [Spring; 10],
+     wheel_delta: f32,
+     wheel_at: f64,
+     wheel_page_at: f64,
+@@ -874,6 +876,8 @@ pub struct App {
+     /// 天气页的当前数据与后台拉取状态。
+     pub(crate) weather: crate::weather::State,
+     pub(crate) weather_source: crate::weather_source_ui::State,
++    /// 打印页：本机打印监控的状态快照与轮询。
++    pub(crate) bambu: crate::bambu::State,
+     pub(crate) updates: crate::updates::State,
+     pub(crate) resident: bar::Motion,
+     pub(crate) resident_power: (Option<u8>,bool),
+@@ -1006,6 +1010,7 @@ impl App {
+             quota: crate::quota_ui::State::load(),
+             weather,
+             weather_source,
++            bambu: crate::bambu::State::default(),
+             updates: crate::updates::State::load(model::config_dir().join("update-check.json")),
+             resident: Default::default(), resident_power:(None,false),
+         }
+@@ -1769,7 +1774,7 @@ impl App {
+     }
+ 
+     pub(crate) fn expanded_height(&self)->f32 {
+-        if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==WEATHER_PAGE {WEATHER_H}else if self.page==6{176.0}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
++        if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==WEATHER_PAGE {WEATHER_H}else if self.page==BAMBU_PAGE {BAMBU_H}else if self.page==6{176.0}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
+     }
+ 
+     // ---------------------------------------------------------------
+@@ -1787,6 +1792,7 @@ impl App {
+         self.fullscreen_hidden=env.fullscreen_hidden;
+         self.quota_tick();
+         self.weather_tick();
++        self.bambu_tick(dt);
+         self.current_hour=env.hour();
+         self.system_idle=env.idle_seconds;
+         self.dt = dt;
+@@ -2187,6 +2193,7 @@ impl App {
+             || !self.resident.settled()
+             || self.open && self.page==3 && self.shelf_x.values().any(|s| !s.settled(68.0))
+             || self.open && self.page==2 && (!self.water_ring.settled(1.0) || !self.sit_view_t.settled(1.0) || !self.sit_t.settled(1.0))
++            || self.open && self.page==BAMBU_PAGE && !self.bambu.shown.settled(1.0)
+             || self.toast.is_some()
+             || self.t < self.notification_bell_until && self.t-self.notification_bell_at < 0.95
+             || self.notice.as_ref().is_some_and(|a|a.source!=crate::extras::AlertSource::Internal&&self.t-a.at<0.95)
+@@ -3029,6 +3036,7 @@ impl App {
+             6 => ("AI", "额度", theme::SOFT_GREEN),
+             8 if self.weather.solar_open => ("日出", "日落", theme::YELLOW),
+             8 => ("当地", "天气", theme::CYAN),
++            BAMBU_PAGE => ("打印", "进度", theme::GREEN),
+             _ => ("岛仔", "设置", theme::WHITE),
+         };
+         let wa = c.text(15.0, base, a, size::TITLE, W::Bold, theme::WHITE, H::Left);
+@@ -3040,7 +3048,7 @@ impl App {
+     fn nav(&mut self, c: &Card) {
+         let pages: Vec<_>=self.settings.page_order.iter().copied().filter(|page|self.settings.visible_pages[*page]).collect();
+         if pages.len()<2 { return; }
+-        let arrow_y=if self.page==6||self.page==8{88.0}else{68.0};
++        let arrow_y=if self.page==BAMBU_PAGE {78.0}else if self.page==6||self.page==8{88.0}else{68.0};
+         let l = c.hit(8.0, arrow_y-13.0, 26.0, 26.0, "nav-l");
+         let r = c.hit(385.0, arrow_y-13.0, 26.0, 26.0, "nav-r");
+         let (lh, lp) = c.hover_t(&l);
+@@ -3087,6 +3095,7 @@ impl App {
+             5 => self.page_mail(c, env, cmds),
+             6 => self.page_quota(c),
+             8 => self.page_weather(c,env,cmds),
++            BAMBU_PAGE => self.page_bambu(c),
+             CALENDAR_PAGE => self.page_calendar(c,env),
+             _ => self.page_settings(c),
+         }
+diff --git a/src/bambu.rs b/src/bambu.rs
+new file mode 100644
+index 0000000..6f014e8
+--- /dev/null
++++ b/src/bambu.rs
+@@ -0,0 +1,792 @@
++//! 打印页：本机「拓竹打印监控」（BambuMonitor）的实时打印进度。
++//!
++//! 岛仔自己不连接打印机、也不接触打印机凭据：数据来自 BambuMonitor 提供的
++//! **只读本地状态桥**（`GET http://127.0.0.1:<port>/status`，见该项目的
++//! `bambu_monitor/bridge.py`）。桥没启动或监控退出时，本页显示「未连接」，
++//! 不会影响其它功能，也不会重试到刷屏。
++//!
++//! 这一整个功能（取数 + 渲染）都收在这个文件里，页面注册只有几行机械改动；
++//! 以后岛仔的插件系统开放「贡献一个页面」的能力时，可以整块搬走。
++//!
++//! # 数据契约
++//!
++//! ```json
++//! { "api": 1, "source": "bambumon", "updated": 1763300000.0, "age": 1.2,
++//!   "printer": {"name": "Good Mini", "model": "A1 mini"},
++//!   "status": { "online": true, "gcode_state": "RUNNING", "state_text": "打印中",
++//!               "stage_text": "打印中", "percent": 37, "remaining": 42,
++//!               "layer": 118, "total_layer": 320, "file": "benchy.3mf",
++//!               "nozzle": 214.5, "nozzle_target": 215.0,
++//!               "bed": 59.8, "bed_target": 60.0, "hms": [], "ams_text": "空闲" } }
++//! ```
++
++use crate::app::App;
++use crate::paint::{self, capsule, Card, H};
++use crate::theme::{self, size, W};
++use eframe::egui;
++use eframe::egui::Color32;
++use std::f32::consts::{FRAC_PI_2, TAU};
++use std::sync::mpsc::{self, Receiver, TryRecvError};
++use std::time::Duration;
++
++/// 桥的默认端口，与 BambuMonitor 的 `bridge.py` 保持一致。
++pub const DEFAULT_PORT: u16 = 39778;
++/// 端口被占用时监控会往后试几个，实际端口写在 bridge.json 里。
++const PORT_FILE: &str = "BambuMonitor\\rt\\bridge.json";
++/// 页面在前台时的轮询间隔（秒）。
++const POLL_VISIBLE: f64 = 1.0;
++/// 页面不在前台时的轮询间隔；只为让收起的状态保持新鲜。
++const POLL_IDLE: f64 = 5.0;
++/// 桥的快照超过这么多秒没更新，就当监控掉线了。
++const STALE_AFTER: f64 = 20.0;
++/// 连续失败后的最大退避（秒）：监控没开时不至于每秒敲一次端口。
++const BACKOFF_MAX: f64 = 30.0;
++
++// 版式（面板局部逻辑点）：左边进度环，右边五行文字，底下一行动作。
++const RING_X: f32 = 66.0;
++const RING_Y: f32 = 78.0;
++const RING_R: f32 = 28.0;
++const RING_W: f32 = 7.0;
++/// 右栏起点与可用宽度（面板宽 419，右侧留 15 的边）。
++const COL_X: f32 = 106.0;
++const COL_W: f32 = 298.0;
++
++#[derive(Clone, Debug, Default)]
++pub struct Printer {
++    pub name: String,
++    pub model: String,
++}
++
++#[derive(Clone, Debug, Default)]
++pub struct Status {
++    pub online: bool,
++    /// `RUNNING` / `PAUSE` / `FINISH` / `FAILED` / `IDLE` …
++    pub gcode: String,
++    /// 监控算好的中文状态（打印中 / 已暂停 …）。
++    pub state_text: String,
++    /// 当前阶段（热床预热、换料中 …）。
++    pub stage_text: String,
++    pub percent: f64,
++    /// 剩余分钟数。
++    pub remaining: Option<f64>,
++    pub layer: Option<f64>,
++    pub total_layer: Option<f64>,
++    pub file: String,
++    pub nozzle: Option<f64>,
++    pub nozzle_target: Option<f64>,
++    pub bed: Option<f64>,
++    pub bed_target: Option<f64>,
++    pub hms: usize,
++    pub print_error: f64,
++    pub ams_text: String,
++}
++
++impl Status {
++    /// 正在打印（含准备阶段）。
++    pub fn busy(&self) -> bool {
++        matches!(self.gcode.as_str(), "RUNNING" | "PREPARE" | "SLICING")
++    }
++
++    pub fn paused(&self) -> bool {
++        self.gcode == "PAUSE"
++    }
++
++    pub fn failed(&self) -> bool {
++        self.gcode == "FAILED" || self.print_error > 0.0
++    }
++
++    /// 状态文案：优先用监控翻译好的中文。
++    pub fn label(&self) -> &str {
++        if !self.state_text.trim().is_empty() {
++            return self.state_text.trim();
++        }
++        match self.gcode.as_str() {
++            "RUNNING" => "打印中",
++            "PREPARE" => "准备中",
++            "SLICING" => "切片中",
++            "PAUSE" => "已暂停",
++            "FINISH" => "已完成",
++            "FAILED" => "失败",
++            "IDLE" => "空闲",
++            "OFFLINE" => "离线",
++            _ => "未知",
++        }
++    }
++
++    /// 进度环的渐变（上亮下暗），按状态换色。
++    pub fn accent(&self) -> (Color32, Color32) {
++        if self.failed() {
++            (theme::RED_TOP, theme::RED)
++        } else if self.paused() {
++            (Color32::from_rgb(255, 214, 92), Color32::from_rgb(206, 150, 20))
++        } else if self.gcode == "FINISH" {
++            (Color32::from_rgb(140, 205, 255), theme::BLUE_DEEP)
++        } else if self.busy() {
++            (Color32::from_rgb(112, 232, 160), Color32::from_rgb(30, 158, 92))
++        } else {
++            (Color32::from_gray(168), Color32::from_gray(116))
++        }
++    }
++
++    /// 剩余时间文案：`1 小时 20 分` / `42 分钟`。
++    pub fn remaining_text(&self) -> String {
++        let Some(minutes) = self.remaining else { return String::new(); };
++        let m = minutes.round() as i64;
++        if m <= 0 {
++            return String::new();
++        }
++        let (h, mm) = (m / 60, m % 60);
++        if h > 0 && mm > 0 {
++            format!("{h} 小时 {mm} 分")
++        } else if h > 0 {
++            format!("{h} 小时")
++        } else {
++            format!("{mm} 分钟")
++        }
++    }
++
++    pub fn layer_text(&self) -> String {
++        match (self.layer, self.total_layer) {
++            (Some(layer), Some(total)) if total > 0.0 => {
++                format!("{} / {} 层", layer.round() as i64, total.round() as i64)
++            }
++            (Some(layer), _) => format!("{} 层", layer.round() as i64),
++            _ => String::new(),
++        }
++    }
++}
++
++/// 一次成功拉取的完整快照。
++#[derive(Clone, Debug, Default)]
++pub struct Doc {
++    pub printer: Printer,
++    pub status: Status,
++    /// 桥自己算的「该快照距今多少秒」。
++    pub age: f64,
++}
++
++impl Doc {
++    /// 数据还新鲜、并且打印机在线，才按「有进度」显示。
++    pub fn live(&self) -> bool {
++        self.age < STALE_AFTER && self.status.online
++    }
++}
++
++// ---------------------------------------------------------------------------
++// 解析：字段类型会随固件/版本变（数字有时是字符串），所以逐个宽松取值。
++// ---------------------------------------------------------------------------
++fn text(value: &serde_json::Value, key: &str) -> String {
++    match value.get(key) {
++        Some(serde_json::Value::String(s)) => s.clone(),
++        Some(serde_json::Value::Number(n)) => n.to_string(),
++        _ => String::new(),
++    }
++}
++
++fn num(value: &serde_json::Value, key: &str) -> Option<f64> {
++    match value.get(key)? {
++        serde_json::Value::Number(n) => n.as_f64(),
++        serde_json::Value::String(s) => {
++            let cleaned: String = s.chars().filter(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+')).collect();
++            cleaned.parse().ok()
++        }
++        _ => None,
++    }
++}
++
++fn flag(value: &serde_json::Value, key: &str) -> bool {
++    value.get(key).and_then(serde_json::Value::as_bool).unwrap_or(false)
++}
++
++/// 把桥的响应解析成快照。格式不对时返回错误，界面据此显示「未连接」。
++pub fn parse(body: &str) -> Result<Doc, String> {
++    let root: serde_json::Value = serde_json::from_str(body).map_err(|_| "状态桥返回的不是 JSON".to_string())?;
++    if !root.is_object() {
++        return Err("状态桥返回的 JSON 不是对象".into());
++    }
++    let api = num(&root, "api").unwrap_or(0.0);
++    if api != 1.0 {
++        return Err(format!("状态桥接口版本不符（{api}），请升级打印监控"));
++    }
++    let printer_value = root.get("printer").cloned().unwrap_or(serde_json::Value::Null);
++    let status_value = root.get("status").cloned().unwrap_or(serde_json::Value::Null);
++    let hms = status_value.get("hms").and_then(|v| v.as_array()).map(|list| list.len()).unwrap_or(0);
++    Ok(Doc {
++        printer: Printer { name: text(&printer_value, "name"), model: text(&printer_value, "model") },
++        status: Status {
++            online: flag(&status_value, "online"),
++            gcode: text(&status_value, "gcode_state").to_uppercase(),
++            state_text: text(&status_value, "state_text"),
++            stage_text: text(&status_value, "stage_text"),
++            percent: num(&status_value, "percent").unwrap_or(0.0).clamp(0.0, 100.0),
++            remaining: num(&status_value, "remaining"),
++            layer: num(&status_value, "layer"),
++            total_layer: num(&status_value, "total_layer"),
++            file: text(&status_value, "file"),
++            nozzle: num(&status_value, "nozzle"),
++            nozzle_target: num(&status_value, "nozzle_target"),
++            bed: num(&status_value, "bed"),
++            bed_target: num(&status_value, "bed_target"),
++            hms,
++            print_error: num(&status_value, "print_error").unwrap_or(0.0),
++            ams_text: text(&status_value, "ams_text"),
++        },
++        age: num(&root, "age").unwrap_or(f64::MAX),
++    })
++}
++
++// ---------------------------------------------------------------------------
++// 取数
++// ---------------------------------------------------------------------------
++/// 读取桥的实际端口：监控把端口写在 `%APPDATA%\BambuMonitor\rt\bridge.json`，
++/// 读不到就用默认端口。`DAOZAI_BAMBU_PORT` 仅供调试指定。
++pub fn discover_port() -> u16 {
++    if let Ok(value) = std::env::var("DAOZAI_BAMBU_PORT") {
++        if let Ok(port) = value.trim().parse::<u16>() {
++            return port;
++        }
++    }
++    let Some(appdata) = std::env::var_os("APPDATA") else { return DEFAULT_PORT; };
++    let path = std::path::Path::new(&appdata).join(PORT_FILE);
++    let Ok(raw) = std::fs::read_to_string(path) else { return DEFAULT_PORT; };
++    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else { return DEFAULT_PORT; };
++    value.get("port").and_then(serde_json::Value::as_u64).filter(|p| *p > 0 && *p < 65536).map(|p| p as u16).unwrap_or(DEFAULT_PORT)
++}
++
++/// 只连本机回环地址：显式忽略环境里的代理，否则 `127.0.0.1` 会被送进代理。
++fn http_agent() -> ureq::Agent {
++    ureq::AgentBuilder::new().try_proxy_from_env(false)
++        .timeout_connect(Duration::from_millis(700))
++        .timeout(Duration::from_millis(1500))
++        .build()
++}
++
++fn fetch(port: u16) -> Result<Doc, String> {
++    let url = format!("http://127.0.0.1:{port}/status");
++    let response = http_agent().get(&url).call().map_err(|error| match error {
++        // 监控没运行时是最常见的「连接被拒绝」，文案直接指向该做的事。
++        ureq::Error::Transport(_) => "没有连上打印监控".to_string(),
++        _ => "读取打印状态失败".to_string(),
++    })?;
++    if response.status() != 200 {
++        return Err(format!("状态桥返回 {}", response.status()));
++    }
++    let body = response.into_string().map_err(|_| "读取打印状态失败".to_string())?;
++    parse(&body)
++}
++
++// ---------------------------------------------------------------------------
++// 状态
++// ---------------------------------------------------------------------------
++pub struct State {
++    pub snapshot: Option<Doc>,
++    /// 最近一次失败的原因；有快照时只作为脚注，不抢主显示。
++    pub error: Option<String>,
++    pub loading: bool,
++    /// 进度环的缓动量（0..1），让百分比变化有「走」的感觉。
++    pub shown: crate::anim::Spring,
++    last_start: f64,
++    failures: u32,
++    port: u16,
++    /// 端口只查一次；之后只有失败时才重新读监控写的 bridge.json。
++    discovered: bool,
++    rx: Option<Receiver<Result<Doc, String>>>,
++}
++
++impl Default for State {
++    fn default() -> Self {
++        Self {
++            snapshot: None,
++            error: None,
++            loading: false,
++            shown: crate::anim::Spring::new(0.0, 120.0, 0.9),
++            last_start: -100.0,
++            failures: 0,
++            port: DEFAULT_PORT,
++            discovered: false,
++            rx: None,
++        }
++    }
++}
++
++impl State {
++    /// 失败次数越多退避越久；一次成功就清零。
++    fn backoff(&self) -> f64 {
++        if self.failures == 0 {
++            0.0
++        } else {
++            (POLL_VISIBLE * 2f64.powi(self.failures.min(5) as i32)).min(BACKOFF_MAX)
++        }
++    }
++
++    pub fn interval(&self, visible: bool) -> f64 {
++        let base = if visible { POLL_VISIBLE } else { POLL_IDLE };
++        base.max(self.backoff())
++    }
++
++    pub fn should_refresh(&self, now: f64, visible: bool) -> bool {
++        !self.loading && now - self.last_start >= self.interval(visible)
++    }
++
++    /// 起一次后台请求（不阻塞界面）。
++    pub fn refresh(&mut self, now: f64) {
++        // 端口只在第一次（以及每次失败后）去读监控写的 bridge.json，不必每秒读文件。
++        let port = if self.discovered && self.failures == 0 { self.port } else { discover_port() };
++        self.port = port;
++        self.discovered = true;
++        let (tx, rx) = mpsc::channel();
++        self.rx = Some(rx);
++        self.loading = true;
++        self.last_start = now;
++        std::thread::spawn(move || {
++            let _ = tx.send(fetch(port));
++        });
++    }
++
++    /// 收集后台结果；有新数据时返回 true（外壳据此立即重绘）。
++    pub fn poll(&mut self) -> bool {
++        let Some(rx) = &self.rx else { return false; };
++        match rx.try_recv() {
++            Ok(result) => {
++                self.rx = None;
++                self.loading = false;
++                match result {
++                    Ok(doc) => {
++                        self.snapshot = Some(doc);
++                        self.error = None;
++                        self.failures = 0;
++                    }
++                    Err(error) => {
++                        self.error = Some(error);
++                        self.failures = self.failures.saturating_add(1);
++                    }
++                }
++                true
++            }
++            Err(TryRecvError::Empty) => false,
++            Err(TryRecvError::Disconnected) => {
++                self.rx = None;
++                self.loading = false;
++                self.error = Some("读取打印状态失败".into());
++                self.failures = self.failures.saturating_add(1);
++                true
++            }
++        }
++    }
++
++    pub fn port(&self) -> u16 {
++        self.port
++    }
++}
++
++// ---------------------------------------------------------------------------
++// 页面
++// ---------------------------------------------------------------------------
++/// 进度环：从 12 点方向顺时针铺，上亮下暗。
++fn progress_ring(c: &Card, cx: f32, cy: f32, radius: f32, width: f32, frac: f32, top: Color32, bottom: Color32) {
++    c.ring(cx, cy, radius, width, Color32::from_rgb(38, 38, 42));
++    let frac = frac.clamp(0.0, 1.0);
++    if frac <= 0.001 {
++        return;
++    }
++    let steps = (120.0 * frac).ceil().max(2.0) as usize;
++    let a0 = -FRAC_PI_2;
++    let mut prev = (cx + radius * a0.cos(), cy + radius * a0.sin());
++    for i in 1..=steps {
++        let a = a0 + TAU * frac * i as f32 / steps as f32;
++        let next = (cx + radius * a.cos(), cy + radius * a.sin());
++        let t = ((prev.1 + next.1) * 0.5 - (cy - radius)) / (2.0 * radius);
++        c.seg(prev, next, width, paint::mix(top, bottom, t));
++        prev = next;
++    }
++    c.circle(cx, cy - radius, width * 0.5, top);
++    c.circle(prev.0, prev.1, width * 0.5, paint::mix(top, bottom, ((prev.1 - (cy - radius)) / (2.0 * radius)).clamp(0.0, 1.0)));
++}
++
++impl App {
++    /// 打印页。坐标是面板局部逻辑点（419×BAMBU_H），文字 y 是基线。
++    pub(crate) fn page_bambu(&mut self, c: &Card) {
++        match self.bambu.snapshot.clone() {
++            Some(doc) if doc.live() => self.bambu_connected(c, &doc),
++            // 桥还在、只是打印机离线（或者快照不再更新）：保留上次的画面，压暗并说明原因。
++            Some(doc) => self.bambu_stale(c, &doc),
++            None => self.bambu_offline(c),
++        }
++    }
++
++    fn bambu_connected(&mut self, c: &Card, doc: &Doc) {
++        let status = &doc.status;
++        let (top, bottom) = status.accent();
++        let (cx, cy, radius) = (RING_X, RING_Y, RING_R);
++        c.glow(cx, cy, 42.0, paint::alpha(bottom, 0.30));
++        progress_ring(c, cx, cy, radius, RING_W, self.bambu.shown.pos, top, bottom);
++
++        // 环心：百分比。数字与「%」分开排，小字号里才不会挤成一团。
++        let pct = format!("{:.0}", status.percent);
++        let number_w = c.text_w(&pct, 20.0, W::Bold);
++        let total_w = number_w + c.text_w("%", 10.0, W::Semibold) + 0.5;
++        c.centered_text(cx - total_w / 2.0 + number_w / 2.0, cy, &pct, 20.0, W::Bold, theme::WHITE, H::Center);
++        c.text(cx - total_w / 2.0 + number_w + 0.5, cy + 3.5, "%", 10.0, W::Semibold, paint::mix(theme::WHITE, top, 0.5), H::Left);
++
++        // 右侧五行：文件名 / 状态·阶段 / 层数与剩余 / 温度 / 告警或 AMS
++        let left = COL_X;
++        let name = if status.file.trim().is_empty() { "（未在打印）".to_string() } else { status.file.clone() };
++        let name = c.fit(&name, size::BODY, W::Semibold, COL_W);
++        c.text(left, 48.0, &name, size::BODY, W::Semibold, theme::WHITE, H::Left);
++
++        let mut x = left;
++        if status.failed() || status.paused() {
++            c.circle(left + 3.0, 59.5, 3.0, paint::mix(top, theme::WHITE, 0.2));
++            x = left + 11.0;
++        }
++        x += c.text(x, 63.0, status.label(), size::SMALL, W::Semibold, top, H::Left);
++        let stage = status.stage_text.trim();
++        if !stage.is_empty() && stage != status.label() {
++            x += c.text(x, 63.0, " · ", size::SMALL, W::Regular, theme::DIM, H::Left);
++            c.text(x, 63.0, &c.fit(stage, size::SMALL, W::Regular, COL_W - (x - left)), size::SMALL, W::Regular, theme::GRAY, H::Left);
++        }
++
++        let mut line = status.layer_text();
++        let remain = status.remaining_text();
++        if !remain.is_empty() {
++            if !line.is_empty() {
++                line.push_str(" · ");
++            }
++            line.push_str("还剩 ");
++            line.push_str(&remain);
++        }
++        if !line.is_empty() {
++            c.text(left, 78.0, &line, size::SMALL, W::Regular, theme::GRAY, H::Left);
++        }
++
++        // 温度：当前值白色，目标值压暗
++        let mut tx = left;
++        let mut any_temp = false;
++        if let Some(nozzle) = status.nozzle {
++            tx += c.text(tx, 93.0, "喷嘴 ", size::TINY, W::Regular, theme::DIM, H::Left);
++            tx += c.text(tx, 93.0, &format!("{nozzle:.0}"), size::SMALL, W::Semibold, theme::WHITE, H::Left);
++            if let Some(target) = status.nozzle_target {
++                tx += c.text(tx, 93.0, &format!("/{target:.0}°"), size::TINY, W::Regular, theme::DIM, H::Left);
++            }
++            any_temp = true;
++        }
++        if let Some(bed) = status.bed {
++            tx += c.text(tx, 93.0, if any_temp { "   热床 " } else { "热床 " }, size::TINY, W::Regular, theme::DIM, H::Left);
++            tx += c.text(tx, 93.0, &format!("{bed:.0}"), size::SMALL, W::Semibold, theme::WHITE, H::Left);
++            if let Some(target) = status.bed_target {
++                c.text(tx, 93.0, &format!("/{target:.0}°"), size::TINY, W::Regular, theme::DIM, H::Left);
++            }
++        }
++
++        // 告警优先于 AMS：告警要人处理，换料只是过程。
++        if status.hms > 0 {
++            let color = if status.failed() { theme::RED_TOP } else { theme::YELLOW };
++            c.text(left, 108.0, &format!("打印机告警 {} 项 · 请在屏幕上确认", status.hms), size::SMALL, W::Semibold, color, H::Left);
++        } else if !status.ams_text.trim().is_empty() && status.ams_text.trim() != "空闲" {
++            c.text(left, 108.0, &format!("AMS · {}", c.fit(status.ams_text.trim(), size::SMALL, W::Regular, COL_W - 30.0)), size::SMALL, W::Regular, theme::DIM, H::Left);
++        }
++
++        // 右上角：机型（很小，不抢内容）
++        let mut meta = doc.printer.model.clone();
++        if meta.is_empty() {
++            meta = doc.printer.name.clone();
++        }
++        if !meta.is_empty() {
++            let meta = c.fit(&meta, size::TINY, W::Regular, 120.0);
++            c.text(374.0, 25.0, &meta, size::TINY, W::Regular, paint::alpha(theme::GRAY, 0.65), H::Right);
++        }
++
++        self.bambu_footer(c, doc.age, "刷新", "bambu-refresh");
++    }
++
++    /// 桥还在，但打印机离线（或快照停止更新）：保留上次画面，整体压暗并说明原因，
++    /// 免得让人以为监控挂了。
++    fn bambu_stale(&mut self, c: &Card, doc: &Doc) {
++        let status = &doc.status;
++        let dim = paint::alpha(theme::WHITE, 0.42);
++        let (cx, cy, radius) = (RING_X, RING_Y, RING_R);
++        progress_ring(c, cx, cy, radius, RING_W, self.bambu.shown.pos, Color32::from_gray(120), Color32::from_gray(70));
++        let pct = format!("{:.0}", status.percent);
++        let number_w = c.text_w(&pct, 20.0, W::Bold);
++        let total_w = number_w + c.text_w("%", 10.0, W::Semibold) + 0.5;
++        c.centered_text(cx - total_w / 2.0 + number_w / 2.0, cy, &pct, 20.0, W::Bold, dim, H::Center);
++        c.text(cx - total_w / 2.0 + number_w + 0.5, cy + 3.5, "%", 10.0, W::Semibold, dim, H::Left);
++
++        let left = COL_X;
++        let name = if status.file.trim().is_empty() { "（不在打印）".to_string() } else { status.file.clone() };
++        let name = c.fit(&name, size::BODY, W::Semibold, COL_W);
++        c.text(left, 48.0, &name, size::BODY, W::Semibold, dim, H::Left);
++
++        // 区分「打印机离线」和「监控没在刷新」：前者等打印机，后者要去看监控进程。
++        // 只有正在打印/暂停/已完成/失败这类有信息量的状态才跟在后面，免得出现「离线 · 空闲」。
++        let label = status.label();
++        let informative = status.busy() || status.paused() || status.gcode == "FINISH" || status.failed();
++        let reason = if doc.age >= STALE_AFTER {
++            "监控已断开 · 显示的是上次状态".to_string()
++        } else if informative {
++            format!("打印机离线 · {label}")
++        } else {
++            "打印机离线".to_string()
++        };
++        c.text(left, 63.0, &reason, size::SMALL, W::Semibold, paint::alpha(theme::YELLOW, 0.75), H::Left);
++
++        let mut line = status.layer_text();
++        let remain = status.remaining_text();
++        if !remain.is_empty() {
++            if !line.is_empty() {
++                line.push_str(" · ");
++            }
++            line.push_str("还剩 ");
++            line.push_str(&remain);
++        }
++        if !line.is_empty() {
++            c.text(left, 78.0, &line, size::SMALL, W::Regular, paint::alpha(theme::GRAY, 0.7), H::Left);
++        }
++        if status.hms > 0 {
++            c.text(left, 93.0, &format!("上次有 {} 项告警", status.hms), size::SMALL, W::Regular, paint::alpha(theme::YELLOW, 0.8), H::Left);
++        }
++
++        self.bambu_footer(c, doc.age, "刷新", "bambu-refresh");
++    }
++
++    fn bambu_offline(&mut self, c: &Card) {
++        let (cx, cy, radius) = (RING_X, RING_Y, RING_R);
++        c.ring(cx, cy, radius, RING_W, Color32::from_rgb(38, 38, 42));
++        c.centered_text(cx, cy, "--", 19.0, W::Bold, paint::alpha(theme::GRAY, 0.7), H::Center);
++
++        let left = COL_X;
++        c.text(left, 48.0, "未连接打印监控", size::BODY, W::Semibold, theme::GRAY, H::Left);
++        c.text(left, 63.0, "启动 BambuMonitor 后自动接入", size::SMALL, W::Regular, theme::DIM, H::Left);
++        c.text(left, 78.0, &format!("127.0.0.1:{}", self.bambu.port()), size::TINY, W::Regular, paint::alpha(theme::DIM, 0.85), H::Left);
++        // 只有「不是没连上」的原因才单独写一行，避免和标题重复。
++        if let Some(error) = &self.bambu.error {
++            if error != "没有连上打印监控" {
++                c.text(left, 93.0, &c.fit(error, size::TINY, W::Regular, COL_W), size::TINY, W::Regular, paint::alpha(theme::YELLOW, 0.85), H::Left);
++            }
++        }
++
++        self.bambu_footer(c, -1.0, "重试", "bambu-retry");
++    }
++
++    /// 底部一行：左侧动作按钮，右侧状态说明。`age` 小于 0 表示没有数据。
++    fn bambu_footer(&mut self, c: &Card, age: f64, action: &str, id: &str) {
++        let (button, inner) = capsule(c, 15.0, 116.0, 62.0, 25.0, id, theme::BTN, theme::BTN_HOVER);
++        paint::reset(&inner, 30.0, 128.5, 0.0, theme::WHITE);
++        inner.text(41.0, 132.0, action, size::BODY, W::Regular, theme::WHITE, H::Left);
++        if button.clicked() {
++            self.bambu.refresh(self.t);
++        }
++        let note = if age < 0.0 {
++            "在监控里开启状态桥即可接入".to_string()
++        } else if age < 1.5 {
++            "刚刚更新".to_string()
++        } else {
++            format!("{} 秒前更新", age.round() as i64)
++        };
++        c.text(90.0, 132.0, &note, size::TINY, W::Regular, theme::DIM, H::Left);
++        if age >= 0.0 {
++            if let Some(error) = &self.bambu.error {
++                c.text(150.0, 132.0, &c.fit(error, size::TINY, W::Regular, 220.0), size::TINY, W::Regular, paint::alpha(theme::YELLOW, 0.8), H::Left);
++            }
++        }
++    }
++    /// 后台轮询：页面在前台时 1 秒一次，否则放慢；连续失败按退避拉长。
++    pub(crate) fn bambu_tick(&mut self, dt: f32) {
++        let visible = self.open && self.page == crate::app::BAMBU_PAGE;
++        self.bambu.poll();
++        // 目标每帧都跟着当前快照走：不管这一帧有没有新数据，环都对准真实进度。
++        self.bambu.shown.target = match &self.bambu.snapshot {
++            Some(doc) if doc.live() => doc.status.percent as f32 / 100.0,
++            _ => 0.0,
++        };
++        self.bambu.shown.step(dt);
++        if !self.module_on(crate::app::BAMBU_PAGE) {
++            return;
++        }
++        if self.bambu.should_refresh(self.t, visible) {
++            // 单元测试只验证调度，不真的去敲端口。
++            if !cfg!(test) {
++                self.bambu.refresh(self.t);
++            } else {
++                self.bambu.refresh_for_test(self.t);
++            }
++        }
++    }
++}
++
++impl State {
++    /// 测试用：只推进「上次请求时间」，不真的发请求。
++    pub(crate) fn refresh_for_test(&mut self, now: f64) {
++        self.last_start = now;
++    }
++}
++
++impl App {
++    /// 打印页的设置分页：这个功能本身没有可调项，主要是状态说明与桥的排查信息。
++    pub(crate) fn bambu_settings(&mut self, ui: &mut egui::Ui) {
++        use crate::extras::{settings_card, settings_label};
++        ui.label(egui::RichText::new("打印进度来自本机的「拓竹打印监控」。岛仔不连接打印机，也不保存打印机凭据。").size(12.0).color(egui::Color32::from_gray(180)));
++        settings_label(ui, "状态");
++        settings_card(ui, |ui| {
++            let live = self.bambu.snapshot.as_ref().filter(|doc| doc.live());
++            match live {
++                Some(doc) => {
++                    ui.label(format!("已连接 · {} · {}", doc.printer.model, doc.status.label()));
++                    if !doc.status.file.is_empty() {
++                        ui.label(format!("当前任务：{}", doc.status.file));
++                    }
++                    let layer = doc.status.layer_text();
++                    ui.label(if layer.is_empty() {
++                        format!("进度 {:.0}%", doc.status.percent)
++                    } else {
++                        format!("进度 {:.0}% · {layer}", doc.status.percent)
++                    });
++                }
++                None => {
++                    ui.label("未连接");
++                    if let Some(error) = &self.bambu.error {
++                        ui.label(egui::RichText::new(error).size(11.5).color(egui::Color32::from_rgb(220, 170, 60)));
++                    }
++                }
++            }
++            ui.separator();
++            ui.label(format!("状态桥地址：127.0.0.1:{}", self.bambu.port()));
++            ui.horizontal(|ui| {
++                if ui.button("立即刷新").clicked() {
++                    self.bambu.refresh(self.t);
++                }
++            });
++        });
++        settings_label(ui, "监控端");
++        settings_card(ui, |ui| {
++            ui.label("在拓竹打印监控里保持运行即可；建议开启开机自启，并在其 config.json 中确认 app.bridge 为 true（默认开启）。");
++            ui.label(egui::RichText::new("状态桥只监听本机回环地址、只有读取接口，不会上传任何数据。").size(11.5).color(egui::Color32::from_gray(150)));
++        });
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn sample() -> &'static str {
++        r#"{"api":1,"source":"bambumon","updated":1.0,"age":0.4,
++            "printer":{"name":"Good Mini","model":"A1 mini"},
++            "status":{"online":true,"gcode_state":"RUNNING","state_text":"打印中",
++                      "stage_text":"打印中","percent":37,"remaining":42,
++                      "layer":118,"total_layer":320,"file":"benchy.3mf",
++                      "nozzle":214.5,"nozzle_target":215,"bed":59.8,"bed_target":60,
++                      "hms":[],"ams_text":"空闲","print_error":0}}"#
++    }
++
++    #[test]
++    fn parses_bridge_payload() {
++        let doc = parse(sample()).expect("合法快照应能解析");
++        assert_eq!(doc.printer.model, "A1 mini");
++        assert_eq!(doc.status.gcode, "RUNNING");
++        assert_eq!(doc.status.percent, 37.0);
++        assert_eq!(doc.status.file, "benchy.3mf");
++        assert_eq!(doc.status.layer_text(), "118 / 320 层");
++        assert_eq!(doc.status.remaining_text(), "42 分钟");
++        assert!(doc.live(), "在线且新鲜时算已连接");
++    }
++
++    #[test]
++    fn rejects_wrong_api_version() {
++        let body = sample().replace("\"api\":1", "\"api\":2");
++        assert!(parse(&body).unwrap_err().contains("版本"));
++    }
++
++    #[test]
++    fn tolerates_strings_and_missing_fields() {
++        let body = r#"{"api":1,"printer":{},"status":{"online":true,"gcode_state":"pause","percent":"45","remaining":90,"nozzle":"210"}}"#;
++        let doc = parse(body).expect("字段缺失或数字为字符串也要能读");
++        assert_eq!(doc.status.gcode, "PAUSE", "状态统一转大写");
++        assert_eq!(doc.status.percent, 45.0);
++        assert_eq!(doc.status.remaining_text(), "1 小时 30 分");
++        assert!(doc.status.paused());
++    }
++
++    #[test]
++    fn stale_or_offline_is_not_live() {
++        let mut doc = parse(sample()).unwrap();
++        doc.age = STALE_AFTER + 1.0;
++        assert!(!doc.live(), "快照太旧要按未连接显示");
++        doc.age = 0.0;
++        doc.status.online = false;
++        assert!(!doc.live(), "监控报告离线时也按未连接显示");
++    }
++
++    #[test]
++    fn percent_is_clamped_and_state_colors_follow_gcode() {
++        let body = sample().replace("\"percent\":37", "\"percent\":137");
++        assert_eq!(parse(&body).unwrap().status.percent, 100.0);
++        let mut doc = parse(sample()).unwrap();
++        doc.status.gcode = "FAILED".into();
++        assert!(doc.status.failed());
++        doc.status.gcode = "PAUSE".into();
++        assert!(doc.status.paused());
++        assert_eq!(doc.status.label(), "打印中", "有中文状态时优先用监控给的文案");
++    }
++
++    #[test]
++    fn backoff_grows_then_resets() {
++        let mut state = State::default();
++        assert_eq!(state.interval(true), POLL_VISIBLE);
++        state.failures = 3;
++        assert!(state.interval(true) > POLL_VISIBLE);
++        assert!(state.interval(false) >= state.interval(true));
++        state.failures = 0;
++        assert_eq!(state.interval(false), POLL_IDLE);
++    }
++
++    /// 真的走一次 HTTP：起一个只回一帧的本地服务，确认取数与解析这段能通。
++    #[test]
++    fn fetch_reads_status_over_http() {
++        use std::io::{Read, Write};
++        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("测试用本地端口");
++        let port = listener.local_addr().unwrap().port();
++        let body = sample().to_string();
++        std::thread::spawn(move || {
++            if let Ok((mut stream, _)) = listener.accept() {
++                let mut buffer = [0u8; 512];
++                let _ = stream.read(&mut buffer);
++                let response = format!(
++                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
++                    body.len(),
++                    body
++                );
++                let _ = stream.write_all(response.as_bytes());
++            }
++        });
++        let doc = fetch(port).expect("应能读到状态桥的快照");
++        assert_eq!(doc.status.percent, 37.0);
++        assert_eq!(doc.printer.model, "A1 mini");
++        assert!(doc.live());
++    }
++
++    /// 监控没运行时是最常见的场景：错误要指向「没连上」，而不是内部细节。
++    #[test]
++    fn fetch_reports_missing_bridge() {
++        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("测试用本地端口");
++        let port = listener.local_addr().unwrap().port();
++        drop(listener);
++        let error = fetch(port).expect_err("端口没人监听时应报错");
++        assert_eq!(error, "没有连上打印监控");
++    }
++
++    /// 对着**本机真实运行**的状态桥读一次，用来验收整条链路：
++    /// `DAOZAI_BAMBU_PORT=39778 cargo test reads_the_live_bridge -- --ignored --nocapture`
++    #[test]
++    #[ignore = "需要本机运行中的打印监控状态桥"]
++    fn reads_the_live_bridge() {
++        let Some(port) = std::env::var("DAOZAI_BAMBU_PORT").ok().and_then(|value| value.trim().parse::<u16>().ok()) else {
++            return;
++        };
++        let doc = fetch(port).expect("本机状态桥应可读取");
++        println!("live bridge: model={:?} name={:?} online={} state={} pct={:.0} file={:?} layer={} hms={}",
++            doc.printer.model, doc.printer.name, doc.status.online, doc.status.label(),
++            doc.status.percent, doc.status.file, doc.status.layer_text(), doc.status.hms);
++        assert!(doc.live(), "真实桥应该报告在线且新鲜");
++    }
++}
+diff --git a/src/extras.rs b/src/extras.rs
+index ce7d048..de7890b 100644
+--- a/src/extras.rs
++++ b/src/extras.rs
+@@ -1151,7 +1151,7 @@ pub(crate) fn settings_card(ui:&mut egui::Ui,add:impl FnOnce(&mut egui::Ui)) {
+ /// 设置分页对应的功能模块（页面序号）；常规、通知、关于、页面管理不属于任何模块。
+ pub(crate) fn settings_tab_module(tab:usize)->Option<usize>{
+     use crate::app::*;
+-    match tab {1=>Some(MUSIC_PAGE),2=>Some(FOCUS_PAGE),3=>Some(WATER_PAGE),4=>Some(TODO_PAGE),5=>Some(SHELF_PAGE),7=>Some(MAIL_PAGE),8=>Some(CALENDAR_PAGE),11=>Some(QUOTA_PAGE),12=>Some(WEATHER_PAGE),_=>None}
++    match tab {1=>Some(MUSIC_PAGE),2=>Some(FOCUS_PAGE),3=>Some(WATER_PAGE),4=>Some(TODO_PAGE),5=>Some(SHELF_PAGE),7=>Some(MAIL_PAGE),8=>Some(CALENDAR_PAGE),11=>Some(QUOTA_PAGE),12=>Some(WEATHER_PAGE),13=>Some(BAMBU_PAGE),_=>None}
+ }
+ 
+ pub(crate) fn settings_label(ui:&mut egui::Ui,text:&str){
+@@ -1277,9 +1277,9 @@ fn setting_choices(ui:&mut egui::Ui,title:&str,value:&mut u32,values:[u32;3],uni
+     let options:Vec<(u32,&str)>=values.iter().zip(labels.iter()).map(|(v,l)|(*v,l.as_str())).collect();
+     settings_control_row_right(ui,title,|ui|{settings_segmented(ui,value,&options,62.0);});
+ }
+-const SETTINGS_GROUPS: [(&str,usize,usize);9] = [
++const SETTINGS_GROUPS: [(&str,usize,usize);10] = [
+     ("常规",0,0), ("页面管理",10,10), ("音乐与歌词",1,1), ("专注与饮水",2,3),
+-    ("待办与置物",4,5), ("通知、邮箱与日程",6,8), ("AI 额度",11,11), ("天气",12,12), ("关于",9,9),
++    ("待办与置物",4,5), ("通知、邮箱与日程",6,8), ("AI 额度",11,11), ("天气",12,12), ("打印",13,13), ("关于",9,9),
+ ];
+ 
+ impl App {
+@@ -1362,8 +1362,8 @@ impl App {
+                     }
+                 }
+                 ui.visuals_mut().selection.bg_fill=settings_color(ctx,Color32::from_rgb(45,105,165),Color32::from_rgb(209,226,248));
+-                let titles=["常规","音乐与歌词","专注","健康提醒","待办","置物","通知","邮箱","日程","关于","页面管理","AI 额度","天气"];
+-                ui.label(egui::RichText::new(titles[self.settings_tab.min(12)]).size(18.0).strong().color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))));
++                let titles=["常规","音乐与歌词","专注","健康提醒","待办","置物","通知","邮箱","日程","关于","页面管理","AI 额度","天气","打印"];
++                ui.label(egui::RichText::new(titles[self.settings_tab.min(13)]).size(18.0).strong().color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))));
+                 if let Some((_,start,end))=SETTINGS_GROUPS.iter().find(|(_,start,end)|(*start..=*end).contains(&self.settings_tab)) {
+                     if start!=end {
+                         ui.add_space(7.0);
+@@ -1399,6 +1399,7 @@ impl App {
+                         if !self.module_on(page) {ui.disable();}
+                     }
+                     match self.settings_tab {
++                    13=>self.bambu_settings(ui),
+                     12=>self.weather_settings(ui),
+                     11=>self.quota_settings(ui),
+                     10=>{
+@@ -1417,7 +1418,7 @@ impl App {
+                         });
+                         settings_label(ui,"功能页面");
+                         settings_card(ui,|ui|{
+-                            let descriptions=["播放控制与同步歌词","番茄钟与休息计时","喝水与久坐提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","当地天气与七日预报"];
++                            let descriptions=["播放控制与同步歌词","番茄钟与休息计时","喝水与久坐提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","当地天气与七日预报","拓竹打印的实时进度与温度"];
+                             ui.label(egui::RichText::new("拖动左侧手柄调整顺序；关闭的功能不在后台运行，不同步也不提醒，已有数据保留。").size(11.5).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
+                             #[derive(Clone)]
+                             struct PageDrag(usize);
+diff --git a/src/lib.rs b/src/lib.rs
+index 3c754b0..aa3f642 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -41,6 +41,7 @@ pub mod quota;
+ mod quota_ui;
+ pub mod weather;
+ mod weather_ui;
++pub mod bambu;
+ mod weather_source_ui;
+ mod qweather;
+ mod pages;
+diff --git a/src/model.rs b/src/model.rs
+index 8dd58a4..13dba13 100644
+--- a/src/model.rs
++++ b/src/model.rs
+@@ -1,4 +1,4 @@
+-﻿//! 持久化与状态模型。
++//! 持久化与状态模型。
+ //!
+ //! 文件布局与原工具同名同结构（原工具字符串中可见的路径与键名），但默认目录
+ //! 用独立的 `%APPDATA%\Daozai`，避免与原工具的 `%APPDATA%\Nusa` 互相覆盖：
+@@ -216,8 +216,8 @@ pub struct Settings {
+     pub browser_minimal: bool,
+     pub avoid_browsers: bool,
+     pub avoid_apps: Vec<(String,String)>,
+-    pub visible_pages: [bool; 9],
+-    pub page_order: [usize; 9],
++    pub visible_pages: [bool; 10],
++    pub page_order: [usize; 10],
+     pub show_clock: bool,
+     pub show_battery: bool,
+     pub show_weather: bool,
+@@ -286,7 +286,7 @@ pub struct Settings {
+ 
+ impl Default for Settings {
+     fn default() -> Self {
+-        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, oled_shift: false, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 9], page_order: [0,1,2,3,4,5,6,7,8], show_clock: true, show_battery: true, show_weather: true, clock_12h: false, clock_period: 0, clock_seconds: false, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wecom_notifications:false, feishu_notifications:false, dingtalk_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, avoid_top_bar: true, top_bar_on_top: false, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, sit_remind: true, sit_minutes: 60, lunch_rest: true, lunch_start: 720, lunch_end: 810, mail_enabled: true, mail_sync_operations:false, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true, weather_city: String::new(), weather_position: None, weather_saved: Vec::new(), render_compat: false, render_compat_reason: String::new() }
++        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, oled_shift: false, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 10], page_order: [0,1,2,3,4,5,6,7,8,9], show_clock: true, show_battery: true, show_weather: true, clock_12h: false, clock_period: 0, clock_seconds: false, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wecom_notifications:false, feishu_notifications:false, dingtalk_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, avoid_top_bar: true, top_bar_on_top: false, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, sit_remind: true, sit_minutes: 60, lunch_rest: true, lunch_start: 720, lunch_end: 810, mail_enabled: true, mail_sync_operations:false, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true, weather_city: String::new(), weather_position: None, weather_saved: Vec::new(), render_compat: false, render_compat_reason: String::new() }
+     }
+ }
+ 
+@@ -348,12 +348,17 @@ impl Settings {
+                 }
+                 "page_order" => {
+                     if let Ok(order)=v.split(',').map(str::parse::<usize>).collect::<Result<Vec<_>,_>>() {
+-                        if order.len()==9 && (0..9).all(|page|order.contains(&page)) {
++                        if order.len()==10 && (0..10).all(|page|order.contains(&page)) {
+                             s.page_order.copy_from_slice(&order);
++                        } else if order.len()==9 && (0..9).all(|page|order.contains(&page)) {
++                            // 旧配置里没有打印页：接在最后，其余顺序保持不变。
++                            s.page_order[..9].copy_from_slice(&order);
++                            s.page_order[9]=9;
+                         } else if order.len()==8 && (0..8).all(|page|order.contains(&page)) {
+-                            // 旧配置里没有天气页：接在最后，其余顺序保持不变。
++                            // 更旧的配置里没有日程、天气页：接在最后，其余顺序保持不变。
+                             s.page_order[..8].copy_from_slice(&order);
+                             s.page_order[8]=8;
++                            s.page_order[9]=9;
+                         }
+                     }
+                 }
+@@ -363,7 +368,7 @@ impl Settings {
+                 "show_battery" => s.show_battery = v != "0",
+                 "show_clock" => s.show_clock = v != "0",
+                 "show_weather" => s.show_weather = v != "0",
+-                "visible_pages" if (6..=9).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
++                "visible_pages" if (6..=10).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
+                     for (enabled,value) in s.visible_pages.iter_mut().zip(v.bytes()) { *enabled=value==b'1'; }
+                     for enabled in &mut s.visible_pages[v.len()..]{*enabled=v.bytes().any(|b|b==b'1');}
+                 }
+diff --git a/src/ui_tests.rs b/src/ui_tests.rs
+index 9dcbf6d..72e6d27 100644
+--- a/src/ui_tests.rs
++++ b/src/ui_tests.rs
+@@ -82,7 +82,7 @@ fn weather_content_tap_switches_both_ways_with_a_short_transition(){
+ #[test]
+ fn weather_content_tap_keeps_other_controls_independent(){
+     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+-    for (x,y,target) in [(375.0,crate::app::WEATHER_H-7.0,8),(394.0,18.0,8),(367.0,18.0,0),(398.0,88.0,0),(20.0,88.0,7)] {
++    for (x,y,target) in [(375.0,crate::app::WEATHER_H-7.0,8),(394.0,18.0,8),(367.0,18.0,0),(398.0,88.0,9),(20.0,88.0,7)] {
+         let mut h=H::new();h.app.settings.pet=false;
+         h.media=crate::smtc::NowPlaying{source:"cloudmusic.exe".into(),title:"歌曲".into(),artist:"歌手".into(),playing:true,..Default::default()};
+         h.app.weather.snapshot=Some(crate::weather::Snapshot{place:"杭州".into(),temp:19.0,..Default::default()});
+@@ -672,8 +672,8 @@ fn v0649_settings_and_mail_accounts_survive_upgrade(){
+         crate::model::Settings::load().save();
+         let saved=std::fs::read_to_string(directory.join("settings.txt")).unwrap();
+         for line in legacy.lines().filter(|line|!line.starts_with("visible_pages=")&&!line.starts_with("page_order=")){assert!(saved.lines().any(|value|value==line),"升级保存不能改变旧设置：{line}");}
+-        assert!(saved.lines().any(|value|value=="visible_pages=101111111"),"旧页面开关应保留，并默认开启天气页");
+-        assert!(saved.lines().any(|value|value=="page_order=5,2,0,1,3,4,6,7,8"),"旧顺序应保留，并把天气页接在最后");
++        assert!(saved.lines().any(|value|value=="visible_pages=1011111111"),"旧页面开关应保留，并默认开启天气页");
++        assert!(saved.lines().any(|value|value=="page_order=5,2,0,1,3,4,6,7,8,9"),"旧顺序应保留，并把天气页接在最后");
+     }
+     std::fs::write(directory.join("mail-accounts.json"),br#"[{"email":"OldUser@qq.com","provider":"qq","enabled":true},{"email":"old@icloud.com","provider":"icloud","enabled":false}]"#).unwrap();
+     let accounts=crate::mail::load_accounts();
+@@ -2454,7 +2454,7 @@ fn minimal_hover_does_not_catch_tabs_during_collapse() {
+ fn music_header_shortcut_returns_from_every_page_without_controlling_playback() {
+     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+     for playing in [true,false] {
+-        let mut h=H::new();h.app.settings.page_order=[5,2,0,1,3,4,6,7,8];
++        let mut h=H::new();h.app.settings.page_order=[5,2,0,1,3,4,6,7,8,9];
+         h.media=crate::smtc::NowPlaying{source:"cloudmusic.exe".into(),title:"Track".into(),artist:"Artist".into(),playing,duration:120.0,..Default::default()};
+         for page in 1..crate::app::PAGE_NAMES.len() {
+             h.app.show_page(page);h.hover(H::local(300.0,60.0),0.8);h.cmds.clear();
+@@ -2509,7 +2509,7 @@ fn wheel_navigation_reaches_every_page_in_both_directions(){
+     h.app.shelf.items.clear();h.app.todos.items.clear();
+     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+     h.hover(H::local(210.0,18.0),0.3);
+-    for (delta,pages) in [(-40.0,[1,2,3,4,5,6,7,8,0]),(40.0,[8,7,6,5,4,3,2,1,0])] {
++    for (delta,pages) in [(-40.0,[1,2,3,4,5,6,7,8,9,0]),(40.0,[9,8,7,6,5,4,3,2,1,0])] {
+         for page in pages {
+             h.wheel(delta);
+             assert_eq!(h.app.page,page,"滚轮翻页不能被空的置物架或待办卡住");
+@@ -2613,10 +2613,10 @@ fn wheel_handles_small_deltas_without_skipping_pages_on_bursts(){
+ }
+ 
+ #[test]
+-fn navigation_wraps_between_nine_pages_and_notification_settings_remain_accessible() {
++fn navigation_wraps_between_ten_pages_and_notification_settings_remain_accessible() {
+     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.click(H::local(21.0,68.0));assert_eq!(h.app.page,8);
+-    h.hover(H::local(300.0,60.0),0.8);h.click(H::local(398.0,88.0));assert_eq!(h.app.page,0);
++    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.click(H::local(21.0,68.0));assert_eq!(h.app.page,9);
++    h.hover(H::local(300.0,60.0),0.8);h.click(H::local(398.0,78.0));assert_eq!(h.app.page,0);
+     h.app.open_settings_category(3);assert!(h.app.settings_open);assert_eq!(h.app.settings_tab,6);
+ }
+ 
+@@ -3115,7 +3115,7 @@ fn quota_accounts_switch_independently_and_hide_with_the_page() {
+ fn page_visibility_is_saved_and_sets_the_starting_page() {
+     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+     let mut h=H::new();
+-    assert_eq!(h.app.settings.visible_pages,[true;9]);
++    assert_eq!(h.app.settings.visible_pages,[true;10]);
+     assert!(h.app.settings.show_battery);
+     h.app.settings.show_battery=false;
+     h.app.set_page_visible(0,false);
+@@ -3123,17 +3123,17 @@ fn page_visibility_is_saved_and_sets_the_starting_page() {
+     h.app.settings.save();
+     let settings=crate::model::Settings::load();
+     assert!(!settings.show_battery);
+-    assert_eq!(settings.visible_pages,[false,true,true,false,true,true,true,true,true]);
++    assert_eq!(settings.visible_pages,[false,true,true,false,true,true,true,true,true,true]);
+     let restarted=App::new(&h.ctx,Options{fetch_lyrics:false,pet_idle:1e9});
+     assert_eq!(restarted.page(),1);
+     assert_eq!(restarted.settings.visible_pages,settings.visible_pages);
+     assert!(!restarted.settings.show_battery);
+     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=000000\n").unwrap();
+-    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,false,false]);
++    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,false,false,false]);
+     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=1000000\n").unwrap();
+-    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,true,true],"旧版页面开关应保留，并开启新增的日程页与天气页");
++    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,true,true,true],"旧版页面开关应保留，并开启新增的日程页、天气页与打印页");
+     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=invalid\n").unwrap();
+-    assert_eq!(crate::model::Settings::load().visible_pages,[true;9]);
++    assert_eq!(crate::model::Settings::load().visible_pages,[true;10]);
+ }
+ 
+ #[test]
+@@ -3173,7 +3173,7 @@ fn battery_module_can_disable_only_the_power_warning() {
+ fn page_visibility_skips_hidden_pages_in_every_navigation_control() {
+     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+     let mut h=H::new();
+-    for page in [1,3,4,6,7,8] {h.app.set_page_visible(page,false);}
++    for page in [1,3,4,6,7,8,9] {h.app.set_page_visible(page,false);}
+     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+     for expected in [2,5,0] {
+         h.click(H::local(398.0,68.0));
+@@ -3202,7 +3202,7 @@ fn page_visibility_moves_away_from_hidden_page_and_keeps_one_page() {
+     h.app.set_page_visible(4,false);
+     assert_eq!(h.app.page,0);
+     assert!(!h.app.is_editing());
+-    for page in [0,1,3,5,6,7,8] {h.app.set_page_visible(page,false);}
++    for page in [0,1,3,5,6,7,8,9] {h.app.set_page_visible(page,false);}
+     assert_eq!(h.app.page,2);
+     h.app.set_page_visible(2,false);
+     assert!(h.app.settings.visible_pages[2],"不能关闭最后一个页面");
+@@ -5918,13 +5918,13 @@ fn calendar_sync_result_does_not_enqueue_another_sync() {
+ fn page_order_persists_and_controls_navigation() {
+     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+     let mut h=H::new();
+-    h.app.settings.page_order=[5,2,0,1,3,4,6,7,8];
++    h.app.settings.page_order=[5,2,0,1,3,4,6,7,8,9];
+     h.app.settings.save();
+     let settings=crate::model::Settings::load();
+-    assert_eq!(settings.page_order,[5,2,0,1,3,4,6,7,8]);
++    assert_eq!(settings.page_order,[5,2,0,1,3,4,6,7,8,9]);
+     let restarted=App::new(&h.ctx,Options{fetch_lyrics:false,pet_idle:1e9});
+     assert_eq!(restarted.page(),5);
+-    for page in [1,3,4,6,7,8] {h.app.set_page_visible(page,false);}
++    for page in [1,3,4,6,7,8,9] {h.app.set_page_visible(page,false);}
+     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+     for expected in [5,2,0] {
+         h.click(H::local(398.0,68.0));
+@@ -5937,7 +5937,7 @@ fn page_order_persists_and_controls_navigation() {
+     assert_eq!(h.app.page,5);
+     for invalid in ["0,0,1,2,3,4,5,6","8,1,2,3,4,5,6,7","0,1","invalid"] {
+         std::fs::write(crate::model::config_dir().join("settings.txt"),format!("page_order={invalid}\n")).unwrap();
+-        assert_eq!(crate::model::Settings::load().page_order,[0,1,2,3,4,5,6,7,8]);
++        assert_eq!(crate::model::Settings::load().page_order,[0,1,2,3,4,5,6,7,8,9]);
+     }
+ }
+ 
+@@ -5964,9 +5964,9 @@ fn page_order_drag_applies_on_release_and_saves() {
+     draw(&mut h,vec![egui::Event::PointerMoved(from),button(from,true)]);
+     draw(&mut h,vec![egui::Event::PointerMoved(from+egui::vec2(0.0,10.0))]);
+     draw(&mut h,vec![egui::Event::PointerMoved(to)]);
+-    assert_eq!(h.app.settings.page_order,[0,1,2,3,4,5,6,7,8]);
++    assert_eq!(h.app.settings.page_order,[0,1,2,3,4,5,6,7,8,9]);
+     draw(&mut h,vec![button(to,false)]);
+-    assert_eq!(h.app.settings.page_order,[1,2,0,3,4,5,6,7,8]);
++    assert_eq!(h.app.settings.page_order,[1,2,0,3,4,5,6,7,8,9]);
+     assert_eq!(crate::model::Settings::load().page_order,h.app.settings.page_order);
+ }
+ 
+@@ -5990,7 +5990,7 @@ fn settings_theme_follows_system_and_preserves_island_style() {
+                 viewports:std::iter::once((id,egui::ViewportInfo{native_pixels_per_point:Some(1.0),..Default::default()})).collect(),..Default::default()};
+             *capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));
+         });
+-        for tab in 0..12 {
++        for tab in 0..14 {
+             h.app.settings_tab=tab;
+             // AI 额度的添加账号表单默认收起，点「＋ 添加账号」才展开；展开后再检查表单行对齐。
+             h.app.quota.connect_open=tab==11;
+@@ -7114,6 +7114,76 @@ fn feature_gallery(){
+     shoot_feature(&mut h,&mut r,&dest,"clip-off",30,Some(H::local(120.0,60.0)),today);
+ }
+ 
++/// 打印页的几种状态：打印中 / 暂停告警 / 未连接。
++#[test]
++#[ignore="按需导出打印页的实际画面：DAOZAI_BAMBU_PREVIEW_DIR=目录"]
++fn bambu_gallery(){
++    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
++    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_BAMBU_PREVIEW_DIR").expect("需指定预览目录"));
++    std::fs::create_dir_all(&dest).unwrap();
++    let today="2026-11-04";
++    let doc=|gcode:&str,pct:f64,hms:usize,stage:&str| crate::bambu::Doc{
++        printer:crate::bambu::Printer{name:"Good Mini".into(),model:"A1 mini".into()},
++        status:crate::bambu::Status{online:true,gcode:gcode.into(),state_text:String::new(),stage_text:stage.into(),
++            percent:pct,remaining:Some(42.0),layer:Some(118.0),total_layer:Some(320.0),
++            file:"金色小摆件.3mf".into(),nozzle:Some(214.5),nozzle_target:Some(215.0),
++            bed:Some(59.8),bed_target:Some(60.0),hms,print_error:0.0,ams_text:"空闲".into()},
++        age:0.4,
++    };
++    let mut h=H::new();let mut r=feature_raster();h.app.show_page(9);
++    h.app.bambu.snapshot=Some(doc("RUNNING",37.0,0,"热床预热"));h.app.bambu.shown.snap(0.37);
++    shoot_feature(&mut h,&mut r,&dest,"bambu-running",60,Some(H::local(120.0,60.0)),today);
++
++    let mut h=H::new();let mut r=feature_raster();h.app.show_page(9);
++    h.app.bambu.snapshot=Some(doc("PAUSE",52.0,2,"断料暂停"));h.app.bambu.shown.snap(0.52);
++    shoot_feature(&mut h,&mut r,&dest,"bambu-paused",60,Some(H::local(120.0,60.0)),today);
++
++    let mut h=H::new();let mut r=feature_raster();h.app.show_page(9);
++    h.app.bambu.error=Some("没有连上打印监控".into());
++    shoot_feature(&mut h,&mut r,&dest,"bambu-offline",60,Some(H::local(120.0,60.0)),today);
++
++    // 桥还在但打印机离线：保留上次画面、压暗
++    let mut h=H::new();let mut r=feature_raster();h.app.show_page(9);
++    let mut offline_doc=doc("OFFLINE",37.0,0,"");
++    offline_doc.status.online=false;
++    h.app.bambu.snapshot=Some(offline_doc);h.app.bambu.shown.snap(0.37);
++    shoot_feature(&mut h,&mut r,&dest,"bambu-stale",60,Some(H::local(120.0,60.0)),today);
++}
++
++/// 打印页的三种状态都要能画出来；页面关闭后不再轮询。
++#[test]
++fn print_page_renders_every_state_and_stops_polling_when_disabled(){
++    use crate::app::BAMBU_PAGE;
++    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
++    let frame=||crate::bambu::Doc{
++        printer:crate::bambu::Printer{name:"Good Mini".into(),model:"A1 mini".into()},
++        status:crate::bambu::Status{online:true,gcode:"RUNNING".into(),state_text:String::new(),stage_text:"热床预热".into(),
++            percent:37.0,remaining:Some(42.0),layer:Some(118.0),total_layer:Some(320.0),
++            file:"benchy.3mf".into(),nozzle:Some(214.5),nozzle_target:Some(215.0),
++            bed:Some(59.8),bed_target:Some(60.0),hms:0,print_error:0.0,ams_text:"空闲".into()},
++        age:0.4,
++    };
++    let mut h=H::new();h.app.settings.pet=false;h.app.show_page(BAMBU_PAGE);
++    for _ in 0..4 {h.frame(vec![]);}
++    assert_eq!(h.app.page,BAMBU_PAGE,"打印页应能打开");
++    assert!((h.app.expanded_height()-crate::app::BAMBU_H).abs()<0.5,"打印页有自己的高度");
++
++    h.app.bambu.snapshot=Some(frame());
++    for _ in 0..4 {h.frame(vec![]);}
++    assert!(h.app.bambu.shown.pos>0.0,"有进度时环应开始走");
++
++    // 打印机离线（桥还在）也要能画
++    let mut offline=frame();offline.status.online=false;offline.status.gcode="OFFLINE".into();
++    h.app.bambu.snapshot=Some(offline);
++    for _ in 0..3 {h.frame(vec![]);}
++
++    // 关掉页面后不再发起轮询
++    h.app.settings.visible_pages[BAMBU_PAGE]=false;
++    h.app.bambu.loading=false;
++    h.app.bambu_tick(0.016);
++    assert!(!h.app.bambu.loading,"页面关闭后不应再轮询状态桥");
++}
++
+ static SIDE_MUSIC:std::sync::atomic::AtomicBool=std::sync::atomic::AtomicBool::new(false);
+ /// 侧边停靠的画面：画布为 SIDE_W × SIDE_H。
+ fn shoot_side(h:&mut H,raster:&mut crate::preview_raster::Raster,dest:&std::path::Path,name:&str,frames:usize,cursor:Option<Pos2>){
+@@ -8872,7 +8942,7 @@ fn background_services_follow_the_module_switch(){
+ 
+ #[test]
+ fn every_module_settings_tab_maps_to_its_page(){
+-    let titles=["常规","音乐与歌词","专注","健康提醒","待办","置物","通知","邮箱","日程","关于","页面管理","AI 额度","天气"];
++    let titles=["常规","音乐与歌词","专注","健康提醒","待办","置物","通知","邮箱","日程","关于","页面管理","AI 额度","天气","打印"];
+     let mut pages:Vec<_>=(0..titles.len()).filter_map(crate::extras::settings_tab_module).collect();
+     for tab in 0..titles.len() {
+         if let Some(page)=crate::extras::settings_tab_module(tab) {assert!(crate::app::PAGE_NAMES[page].chars().next()==titles[tab].chars().next(),"{} ↔ {}",titles[tab],crate::app::PAGE_NAMES[page]);}
